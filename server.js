@@ -2,6 +2,7 @@ const http = require("http");
 const https = require("https");
 
 const PORT = process.env.PORT || 3000;
+const API_KEY = "cb78844753d0dcf105e587319ef38f6accff0db875c2f46f3606c5d42bb0e116";
 
 function guessSurface(name = "") {
   const n = name.toLowerCase();
@@ -11,48 +12,9 @@ function guessSurface(name = "") {
   return "hard";
 }
 
-function parseFlashscore(raw) {
-  const result = [];
-  const blocos = raw.split("~AA÷").slice(1);
-  for (const bloco of blocos) {
-    try {
-      const campos = {};
-      bloco.split("¬").forEach(par => {
-        const idx = par.indexOf("÷");
-        if (idx > 0) campos[par.slice(0, idx)] = par.slice(idx + 1);
-      });
-      const status = campos["AB"] || "";
-      if (status !== "1") continue;
-      const ts = parseInt(campos["AD"] || "0");
-      const horario = ts
-        ? new Date(ts * 1000).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Sao_Paulo" })
-        : "—";
-      result.push({
-        id: campos["AA"] || String(Math.random()),
-        p1: campos["AE"] || "Jogador 1",
-        p2: campos["AF"] || "Jogador 2",
-        torneio: campos["AN"] || "Torneio",
-        tier: campos["AI"] || "",
-        horario,
-        superficie: guessSurface(campos["AN"] || ""),
-      });
-    } catch (_) {}
-  }
-  return result;
-}
-
-function fetchUrl(url, headers = {}) {
+function fetchUrl(url) {
   return new Promise((resolve, reject) => {
-    const opts = {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "X-GeoIP": "1",
-        "X-Fsign": "SW9D1eZo",
-        "Referer": "https://www.flashscore.com.br/tenis/",
-        ...headers,
-      },
-    };
-    https.get(url, opts, (res) => {
+    https.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
       let data = "";
       res.on("data", chunk => data += chunk);
       res.on("end", () => resolve(data));
@@ -71,11 +33,35 @@ const server = http.createServer(async (req, res) => {
 
   if (req.url === "/partidas") {
     try {
-      const hoje = new Date().toISOString().split("T")[0].replace(/-/g, "");
-      const data = await fetchUrl(
-        `https://d.flashscore.com/x/feed/f_2_${hoje}_1_tennis_1`
-      );
-      const partidas = parseFlashscore(data);
+      const hoje = new Date();
+      const amanha = new Date(hoje.getTime() + 12 * 60 * 60 * 1000);
+      const fmt = d => d.toISOString().split("T")[0];
+
+      const url = `https://api.api-tennis.com/tennis/?method=get_fixtures&APIkey=${API_KEY}&date_start=${fmt(hoje)}&date_stop=${fmt(amanha)}`;
+      const raw = await fetchUrl(url);
+      const data = JSON.parse(raw);
+
+      if (!data.success || !Array.isArray(data.result)) {
+        res.end(JSON.stringify({ success: false, error: data.message || "Sem dados" }));
+        return;
+      }
+
+      const isUpcoming = e => !e.event_winner && ["not started", "ns", ""].includes((e.event_status || "").toLowerCase());
+
+      const partidas = data.result
+        .filter(isUpcoming)
+        .map(e => ({
+          id: String(e.event_key || Math.random()),
+          p1: e.event_first_player || "Jogador 1",
+          p2: e.event_second_player || "Jogador 2",
+          torneio: e.tournament_name || "Torneio",
+          tier: e.event_type_type || "",
+          rodada: e.tournament_round || "",
+          horario: e.event_time || "",
+          data: e.event_date || "",
+          superficie: guessSurface(e.tournament_name || ""),
+        }));
+
       res.end(JSON.stringify({ success: true, partidas }));
     } catch (err) {
       res.end(JSON.stringify({ success: false, error: err.message }));
